@@ -2,312 +2,142 @@ pipeline {
 
   agent any
 
-
-
   environment {
-
-        GIT_REPO = "https://github.com/SuchitShetty/SuchitShetty.git"
-
-        GIT_CREDENTIALS_ID = "suchit.shashi.shetty@accenture.com"
-
-        VENV_DIR = "venv"
-
-    }
-
-
+    GIT_REPO = "https://github.com/SuchitShetty/SuchitShetty.git"
+    GIT_CREDENTIALS_ID = "suchit.shashi.shetty@accenture.com"
+    VENV_DIR = "venv"
+  }
 
   stages {
 
-
-
-        stage('Checkout Code') {
-
-            steps {
-
-                git credentialsId: "${GIT_CREDENTIALS_ID}",
-
-                    url: "${GIT_REPO}",
-
-                    branch: "main"
-
-            }
-
-        }
-
-
+    stage('Checkout Code') {
+      steps {
+        git credentialsId: "${GIT_CREDENTIALS_ID}",
+            url: "${GIT_REPO}",
+            branch: "main"
+      }
+    }
 
     stage('Setup Python Environment') {
+      steps {
+        sh '''
+        python3 -m venv $VENV_DIR
+        $VENV_DIR/bin/pip install --upgrade pip
 
-            steps {
-
-                sh '''
-
-                python3 -m venv $VENV_DIR
-
-                . $VENV_DIR/bin/activate
-
-                pip install --upgrade pip
-
-                pip install -r Requirement.txt
-
-                '''
-
-            }
-
-        }
-
-stage('Snyk Scan') {
-
-    steps {
-
-        withCredentials([string(credentialsId: 'Snyk_Suchit', variable: 'SNYK_TOKEN')]) {
-
-            sh '''
-
-            # Create virtual environment
-
-            python3 -m venv myenv
-
-            . myenv/bin/activate
-
-
-
-            # Use venv pip explicitly
-
-            myenv/bin/pip install -r requirements.txt || true
-
-
-
-            # Install snyk locally (no sudo issues)
-
-            npm install snyk
-
-
-
-            # Authenticate
-
-            npx snyk auth $SNYK_TOKEN
-
-
-
-            # Run scans
-
-            npx snyk test --all-projects || true
-
-            npx snyk monitor --all-projects || true
-
-            '''
-
-        }
-
+        # Fix file name case issue
+        if [ -f Requirement.txt ]; then
+          $VENV_DIR/bin/pip install -r Requirement.txt
+        fi
+        '''
+      }
     }
 
-}
+    stage('Snyk Scan') {
+      steps {
+        withCredentials([string(credentialsId: 'Snyk_Suchit', variable: 'SNYK_TOKEN')]) {
+          sh '''
+          python3 -m venv myenv
 
-stage('DAST (ZAP Scan)') {
+          myenv/bin/pip install -r Requirement.txt || true
 
-  steps {
+          npm install snyk
 
-    sh '''
+          npx snyk auth $SNYK_TOKEN
 
-      echo "🐍 Setting up environment"
+          npx snyk test --all-projects || true
+          npx snyk monitor --all-projects || true
+          '''
+        }
+      }
+    }
 
-      python3 -m venv zap_env
+    stage('DAST (ZAP Scan)') {
+      steps {
+        sh '''
+        echo "🐍 Setting up environment"
 
-      . zap_env/bin/activate
+        python3 -m venv zap_env
 
+        echo "📂 Checking files"
+        pwd
+        ls -la
 
-
-      echo "📂 Checking files"
-
-      pwd
-
-      ls -la
-
-
-
-      # Install dependencies if present
-
-      if [ -f requirement.txt ]; then
-
-        echo "📦 Installing dependencies"
-
-        zap_env/bin/pip install -r requirement.txt
-
-      else
-
-        echo "⚠️ No requirement.txt found, skipping..."
-
-      fi
-
-
-
-      # Install required packages
-
-      zap_env/bin/pip install python-owasp-zap-v2.4 setuptools uvicorn fastapi || true
-
-
-
-      echo "🚀 Starting FastAPI app"
-
-      nohup zap_env/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > zap_app.log 2>&1 &
-
-      APP_PID=$!
-
-
-
-      echo "⏳ Waiting for app to be ready..."
-
-
-
-      # Smart wait
-
-      for i in {1..10}; do
-
-        if curl -s http://127.0.0.1:8000 > /dev/null; then
-
-          echo "✅ App is up!"
-
-          break
-
+        # FIXED: Correct filename
+        if [ -f Requirement.txt ]; then
+          echo "📦 Installing dependencies"
+          zap_env/bin/pip install -r Requirement.txt
+        else
+          echo "⚠️ No Requirement.txt found, skipping..."
         fi
 
-        echo "Waiting..."
+        zap_env/bin/pip install python-owasp-zap-v2.4 uvicorn fastapi || true
 
-        sleep 5
+        echo "🚀 Starting FastAPI app"
+        nohup zap_env/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > zap_app.log 2>&1 &
+        APP_PID=$!
 
-      done
+        echo "⏳ Waiting for app..."
 
+        for i in {1..10}; do
+          if curl -s http://127.0.0.1:8000 > /dev/null; then
+            echo "✅ App is up!"
+            break
+          fi
+          sleep 5
+        done
 
+        HOST_IP=$(hostname -I | awk '{print $1}')
+        echo "🌐 Host IP: $HOST_IP"
 
-      # Get host IP
+        echo "🐳 Running ZAP scan"
 
-      HOST_IP=$(hostname -I | awk '{print $1}')
+        # ✅ FIXED docker command (NO broken line continuation)
+        docker run --rm --network host -v $(pwd):/zap/wrk owasp/zap2docker-stable zap-baseline.py -t http://$HOST_IP:8000 -r /zap/wrk/zap_report.html || true
 
-      echo "🌐 Host IP: $HOST_IP"
+        echo "📄 Checking report"
+        ls -la zap_report.html || echo "❌ Report not found"
 
+        echo "🛑 Stopping app"
+        kill $APP_PID || true
+        '''
 
+        publishHTML([
+          allowMissing: true,
+          alwaysLinkToLastBuild: true,
+          keepAll: true,
+          reportDir: '.',
+          reportFiles: 'zap_report.html',
+          reportName: 'ZAP DAST Report'
+        ])
 
-      echo "🐳 Running ZAP scan"
+        archiveArtifacts artifacts: 'zap_report.html', fingerprint: true
+      }
+    }
 
+    stage('Build Package') {
+      steps {
+        sh '''
+        python3 -m venv env
 
+        env/bin/python -m pip install --upgrade pip
+        env/bin/pip install build
 
-      docker run --rm \
+        env/bin/python -m build || echo "⚠️ Build failed"
 
-        --network host \
+        ls -la dist || true
+        '''
 
-        -v $(pwd):/zap/wrk \
-
-        owasp/zap2docker-stable \
-
-        zap-baseline.py \
-
-        -t http://$HOST_IP:8000 \
-
-        -r /zap/wrk/zap_report.html || true
-
-
-
-      echo "📄 Checking report file..."
-
-      ls -la zap_report.html || echo "❌ Report not found"
-
-
-
-      echo "🛑 Stopping app"
-
-      kill $APP_PID || true
-
-    '''
-
-
-
-    publishHTML([
-
-      allowMissing: true,   // prevents failure if report missing
-
-      alwaysLinkToLastBuild: true,
-
-      keepAll: true,
-
-      reportDir: '.',
-
-      reportFiles: 'zap_report.html',
-
-      reportName: 'ZAP DAST Report'
-
-    ])
-
-
-
-    archiveArtifacts artifacts: 'zap_report.html', fingerprint: true
-
+        archiveArtifacts artifacts: 'dist/*', fingerprint: true, allowEmptyArchive: true
+      }
+    }
   }
-
-}
-
-
-
-stage('Build Package') {
-
-  steps {
-
-    sh '''
-
-      echo "📦 Setting up build environment"
-
-
-
-      python3 -m venv env
-
-
-
-      # Use venv explicitly (fixes PEP 668 issue)
-
-      env/bin/python -m pip install --upgrade pip
-
-      env/bin/pip install build
-
-
-
-      echo "🚀 Building package"
-
-      env/bin/python -m build || echo "⚠️ Build failed (missing pyproject.toml/setup.py)"
-
-
-
-      echo "📂 Checking dist folder"
-
-      ls -la dist || true
-
-    '''
-
-
-
-    archiveArtifacts artifacts: 'dist/*', fingerprint: true, allowEmptyArchive: true
-
-  }
-
-}
-
-}
-
-
 
   post {
-
     success {
-
       echo '✅ Pipeline executed successfully'
-
     }
-
     failure {
-
       echo '❌ Pipeline failed'
-
     }
-
   }
-
 }
