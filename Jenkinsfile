@@ -68,13 +68,13 @@ stage('Snyk Scan') {
 
             python3 -m venv myenv
 
-            . env/bin/activate
+            . myenv/bin/activate
 
 
 
             # Use venv pip explicitly
 
-            env/bin/pip install -r requirements.txt || true
+            myenv/bin/pip install -r requirements.txt || true
 
 
 
